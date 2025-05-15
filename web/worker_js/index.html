@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Worker Host</title>
+    <!-- Assuming worker.js is in the same directory as this HTML -->
+    <script src="worker.js"></script>
+    <script>
+      (async () => {})()
+        .then(() => {
+          console.log("done");
+        })
+        .catch((error) => {
+          window.theError = error;
+          console.error(error.error);
+        });
+    </script>
+  </head>
+  <body>
+    <h1>Flutterflow Analyzer</h1>
+    <p>Worker Host Page</p>
+    <p>
+      If you see this, the HTML file was loaded. Check console for worker.js
+      messages.
+    </p>
+  </body>
+</html>
