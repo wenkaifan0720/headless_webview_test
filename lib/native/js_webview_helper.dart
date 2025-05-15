@@ -260,14 +260,13 @@ class JSWebviewHelper {
 
   /// Calls the JavaScript 'sayHello' function with the given name.
   Future<String> sayHello(String name) async {
-    final result = await _callJsFunction('sayHello', [name], isAsync: false);
+    final result = await _callJsFunction('sayHello', [name]);
     return result.toString();
   }
 
   /// Calls the JavaScript 'calculateSum' function with the given numbers.
   Future<int> calculateSum(int a, int b) async {
-    final result =
-        await _callJsFunction('calculateSum', [a, b], isAsync: false);
+    final result = await _callJsFunction('calculateSum', [a, b]);
     if (result is int) {
       return result;
     } else if (result is num) {
@@ -290,72 +289,74 @@ class JSWebviewHelper {
     print('[JSWebviewHelper:$functionName] Starting with id=$id');
 
     await ensureInitialized();
+
     if (!_isHeadlessWebviewInitialized || _webViewController == null) {
       print(
           '[JSWebviewHelper:$functionName] Cannot execute: webview not properly initialized');
       return null;
     }
 
-    // Use template string to directly reference the function by name
-    // This is cleaner than using window[functionName] for standard functions
-    final String jsBody = '''
-      try {
-        const result = await $functionName(id);
-        console.log('[$functionName JS] Function returned:', result);
-        return result;
-      } catch (e) {
-        console.error('[$functionName JS] Error executing:', e);
-        return `__ERROR__:\${e.toString()}`;
-      }
-    ''';
+    // Create a completer to handle the async result via the JavaScript handler
+    final completer = Completer<String?>();
+
+    // Set up a handler for onDataFetched if not already done
+    // This is typically done when the controller is created, but we check again
+    // to ensure the handler exists
+    _webViewController?.addJavaScriptHandler(
+        handlerName: 'onDataFetched',
+        callback: (args) {
+          print(
+              '[JSWebviewHelper:$functionName] onDataFetched received: $args');
+
+          // Check if we have received the expected ID
+          if (args.length >= 2 && args[0] == id) {
+            final result = args[1];
+
+            // Check for error
+            if (result is String && result.startsWith('__ERROR__:')) {
+              final errorMessage = result.substring('__ERROR__:'.length);
+              print(
+                  '[JSWebviewHelper:$functionName] JS returned error: $errorMessage');
+
+              // Complete with null on error to indicate failure
+              if (!completer.isCompleted) {
+                completer.complete(null);
+              }
+            } else {
+              // Complete with the result
+              print('[JSWebviewHelper:$functionName] Success: result=$result');
+              if (!completer.isCompleted) {
+                completer.complete(result?.toString());
+              }
+            }
+          }
+
+          // The handler doesn't need to return anything meaningful since
+          // we're using the completer to manage the async flow
+          return null;
+        });
 
     try {
-      final result = await _webViewController!.callAsyncJavaScript(
-        functionBody: jsBody,
-        arguments: {'id': id},
-      );
+      // Call the bridge function via evaluateJavascript
+      final confirmationMessage = await _webViewController!
+          .evaluateJavascript(source: "fetchDataWithCallback($id)");
 
-      if (result == null) {
-        print(
-            '[JSWebviewHelper:$functionName] Received null wrapper, unexpected result');
-        return null;
-      }
-
-      if (result.error != null) {
-        print(
-            '[JSWebviewHelper:$functionName] JS execution error: ${result.error}');
-        return null;
-      }
-
-      final jsResult = result.value;
-
-      // Check for custom error string format
-      if (jsResult is String && jsResult.startsWith('__ERROR__:')) {
-        final errorMessage = jsResult.substring('__ERROR__:'.length);
-        print(
-            '[JSWebviewHelper:$functionName] JS returned error: $errorMessage');
-        return null;
-      }
-
-      // For string results, return directly
-      if (jsResult is String) {
-        print('[JSWebviewHelper:$functionName] Success: result=$jsResult');
-        return jsResult;
-      }
-
-      // Handle null result
-      if (jsResult == null) {
-        print('[JSWebviewHelper:$functionName] Null result returned');
-        return null;
-      }
-
-      // Convert other result types to string
-      final stringResult = jsResult.toString();
       print(
-          '[JSWebviewHelper:$functionName] Success (converted to string): result=$stringResult');
-      return stringResult;
+          '[JSWebviewHelper:$functionName] Bridge function called: $confirmationMessage');
+
+      // Set a timeout to avoid getting stuck if the callback never comes
+      Future.delayed(Duration(seconds: 30), () {
+        if (!completer.isCompleted) {
+          print('[JSWebviewHelper:$functionName] Timeout waiting for result');
+          completer.complete(null);
+        }
+      });
+
+      // Wait for the result to be received via the JavaScript handler
+      return await completer.future;
     } catch (e) {
-      print('[JSWebviewHelper:$functionName] Error executing JS: $e');
+      print(
+          '[JSWebviewHelper:$functionName] Error calling bridge function: $e');
       return null;
     }
   }
@@ -363,15 +364,15 @@ class JSWebviewHelper {
   // ===== Private implementation details =====
 
   /// Internal method to call a JavaScript function with the given name and arguments.
-  /// Handles basic argument serialization and differentiates between sync/async calls.
+  /// Handles basic argument serialization for synchronous JavaScript functions.
+  /// For async functions, use direct implementation like in getDataAsync.
   Future<dynamic> _callJsFunction(
       String jsFunctionName, List<dynamic> jsCallArgs,
-      {required bool isAsync}) async {
+      {bool isAsync = false}) async {
+    // isAsync parameter kept for backward compatibility but no longer used
     print(
-        'JSWebviewHelper: _callJsFunction \'$jsFunctionName\' called with args: $jsCallArgs, isAsync: $isAsync');
+        'JSWebviewHelper: _callJsFunction \'$jsFunctionName\' called with args: $jsCallArgs');
     await ensureInitialized();
-    print(
-        'JSWebviewHelper: _callJsFunction \'$jsFunctionName\' - ensureInitialized completed. State: $_isHeadlessWebviewInitialized');
 
     if (!_isHeadlessWebviewInitialized || _webViewController == null) {
       print(
@@ -380,99 +381,32 @@ class JSWebviewHelper {
           "JSWebviewHelper: WebView not initialized or controller is null for calling $jsFunctionName.");
     }
 
-    if (isAsync) {
-      final Map<String, dynamic> internalArgsMap = {
-        'targetFunctionName': jsFunctionName,
-        'targetFunctionArgs': jsCallArgs, // Pass the original Dart args array
-      };
-
-      // Robust async pattern with JS-side try-catch, dynamically calling the function
-      final String functionCallScript = '''
-        (async function() {
-          try {
-            const func = window[targetFunctionName]; // Access directly from arguments map
-            if (typeof func !== 'function') {
-              const errorMsg = `JavaScript function \${targetFunctionName} not found on window.`;
-              console.error(errorMsg);
-              return `__ERROR__:\${errorMsg}`;
-            }
-            const result = await func(...targetFunctionArgs); // Access directly and spread
-            return result;
-          } catch (e) {
-            console.error(`[JS \${targetFunctionName}] Error executing:`, e.message, e.stack);
-            return `__ERROR__:\${e.message}`;
-          }
-        })()
-      ''';
-
-      print(
-          'JSWebviewHelper: Async call for \'$jsFunctionName\' - Using callAsyncJavaScript with robust pattern.');
-      try {
-        final resultWrapper = await _webViewController!.callAsyncJavaScript(
-          functionBody: functionCallScript,
-          arguments: internalArgsMap,
-        );
-
-        if (resultWrapper == null) {
-          print(
-              'JSWebviewHelper: Async call \'$jsFunctionName\' - Received null wrapper, unexpected result.');
-          throw StateError(
-              "JS execution returned a null wrapper for $jsFunctionName.");
-        }
-
-        if (resultWrapper.error != null) {
-          print(
-              'JSWebviewHelper: Async call \'$jsFunctionName\' - JS execution error: ${resultWrapper.error}');
-          throw StateError(
-              "JS execution error for $jsFunctionName: ${resultWrapper.error}");
-        }
-
-        final actualResult = resultWrapper.value;
-        if (actualResult is String && actualResult.startsWith('__ERROR__:')) {
-          final errorMessage = actualResult.substring('__ERROR__:'.length);
-          print(
-              'JSWebviewHelper: Async call \'$jsFunctionName\' - JS returned error: $errorMessage');
-          throw Exception("Error from $jsFunctionName (JS): $errorMessage");
-        }
-
-        print(
-            'JSWebviewHelper: Async call \'$jsFunctionName\' - COMPLETED. Value: $actualResult');
-        return actualResult;
-      } catch (e) {
-        print(
-            'JSWebviewHelper: Async call \'$jsFunctionName\' - Dart/Native ERROR: $e');
-        rethrow;
+    // Convert arguments to JavaScript string representation
+    final argsString = jsCallArgs.map((arg) {
+      if (arg is String) {
+        String encodedArg = jsonEncode(arg);
+        String escapedArg = encodedArg
+            .substring(1, encodedArg.length - 1)
+            .replaceAll("'", "\\\\'");
+        return "\'$escapedArg\'";
       }
-    } else {
-      // Synchronous path using evaluateJavascript
-      final argsString = jsCallArgs.map((arg) {
-        if (arg is String) {
-          String encodedArg = jsonEncode(arg);
-          String escapedArg = encodedArg
-              .substring(1, encodedArg.length - 1)
-              .replaceAll("'", "\\\\'");
-          return "\'$escapedArg\'";
-        }
-        return arg.toString();
-      }).join(',');
+      return arg.toString();
+    }).join(',');
 
-      final scriptToRun = "$jsFunctionName($argsString)";
+    // Construct the function call
+    final scriptToRun = "$jsFunctionName($argsString)";
+    print(
+        'JSWebviewHelper: _callJsFunction \'$jsFunctionName\' - Script: $scriptToRun');
+
+    try {
+      final result =
+          await _webViewController!.evaluateJavascript(source: scriptToRun);
       print(
-          'JSWebviewHelper: Sync call \'$jsFunctionName\' - evaluateJavascript Script: $scriptToRun');
-
-      try {
-        print(
-            'JSWebviewHelper: Sync call \'$jsFunctionName\' - AWAITING evaluateJavascript');
-        final result =
-            await _webViewController!.evaluateJavascript(source: scriptToRun);
-        print(
-            'JSWebviewHelper: Sync call \'$jsFunctionName\' - evaluateJavascript COMPLETED. Result: $result');
-        return result;
-      } catch (e) {
-        print(
-            'JSWebviewHelper: Sync call \'$jsFunctionName\' - evaluateJavascript ERROR: $e');
-        rethrow;
-      }
+          'JSWebviewHelper: _callJsFunction \'$jsFunctionName\' - COMPLETED. Result: $result');
+      return result;
+    } catch (e) {
+      print('JSWebviewHelper: _callJsFunction \'$jsFunctionName\' - ERROR: $e');
+      rethrow;
     }
   }
 }

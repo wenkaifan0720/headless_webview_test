@@ -6,14 +6,37 @@
     <!-- Assuming worker.js is in the same directory as this HTML -->
     <script src="worker.js"></script>
     <script>
-      (async () => {})()
-        .then(() => {
-          console.log("done");
-        })
-        .catch((error) => {
-          window.theError = error;
-          console.error(error.error);
-        });
+      // Bridge function to call getDataAsync and send result back via handler
+      function fetchDataWithCallback(id) {
+        console.log(`[JS Bridge] fetchDataWithCallback called with id=${id}`);
+
+        // Return immediately to avoid blocking, but start the async process
+        setTimeout(async () => {
+          try {
+            // Call the actual getDataAsync function from worker.js
+            const result = await getDataAsync(id);
+            console.log(`[JS Bridge] getDataAsync result:`, result);
+
+            // Send result back to Dart via the registered handler
+            window.flutter_inappwebview.callHandler(
+              "onDataFetched",
+              id,
+              result
+            );
+          } catch (error) {
+            console.error(`[JS Bridge] Error in fetchDataWithCallback:`, error);
+            // Send error back to Dart via the handler
+            window.flutter_inappwebview.callHandler(
+              "onDataFetched",
+              id,
+              `__ERROR__:${error.toString()}`
+            );
+          }
+        }, 0);
+
+        // Return a confirmation that the request was received
+        return `Request to fetch data for ID ${id} was received`;
+      }
     </script>
   </head>
   <body>
